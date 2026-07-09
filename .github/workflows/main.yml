@@ -3,12 +3,19 @@ on:
     push:
         branches:
             - main
+    pull_request:
+        branches:
+          - main
 jobs:
     Build:
         runs-on: ubuntu-latest
         steps:
             - name: code checkout
               uses: actions/checkout@v4
+              with:
+                # fetch-depth: 0 ensures the full git history is cloned instead of a shallow clone.
+                # This is useful if your build or tests rely on git history, tags, or commits.
+                fetch-depth: 0
             - name: Maven Build
               run: mvn install
     Testing:
@@ -17,6 +24,8 @@ jobs:
         steps:
             - name: code checkout
               uses: actions/checkout@v4
+              with:
+                fetch-depth: 0
             - name: Maven Test
               run: mvn test
             - name: checkstyle
