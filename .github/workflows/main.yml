@@ -1,61 +1,99 @@
-name: Build Job
+name: Build Job # workflow title shown in GitHub Actions
 on:
     push:
         branches:
-            - main
+            - main # trigger workflow on pushes to the main branch
     pull_request:
         branches:
-          - main
+          - main # trigger workflow for PRs targeting main
+env:
+    ECR_REPOSITORY_NAME: 'vprofile-container' # name of the ECR repository to push Docker image to
 permissions:
-  contents: read
+  contents: read # give workflow read access to repository contents
 jobs:
     Build:
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-latest # use the latest Ubuntu VM for this job
         steps:
-            - name: code checkout
+            - name: code checkout # checkout repository code into the runner
               uses: actions/checkout@v4
               with:
-                # fetch-depth: 0 ensures the full git history is cloned instead of a shallow clone.
-                # This is useful if your build or tests rely on git history, tags, or commits.
-                fetch-depth: 0
-            - name: Maven Build
+                fetch-depth: 0 # clone full git history instead of shallow history
+            - name: Maven Build # run Maven to build the project
               run: mvn install
-            - name: upload artifact
+            - name: upload artifact # upload compiled WAR to GitHub Actions artifact storage
               uses: actions/upload-artifact@v4
               with:
-                name: vprofile
-                path: target/*.war
-            - name: notify if build fails
+                name: vprofile # artifact name users will see
+                path: target/*.war # path to the built WAR file
+            - name: notify if build fails # print a message only if build fails
               if: failure()
               run: echo "Build failed! Please check the logs for details."
     Testing:
-        runs-on: ubuntu-latest
-        needs: Build
+        runs-on: ubuntu-latest # use Ubuntu VM for tests too
+        needs: Build # run Testing only after Build succeeds
         steps:
-            - name: code checkout
+            - name: code checkout # checkout repository code again in this job
               uses: actions/checkout@v4
               with:
-                fetch-depth: 0
-            - name: Maven Test
+                fetch-depth: 0 # keep full history here as well
+            - name: Maven Test # execute tests defined in the Maven project
               run: mvn test
-            - name: checkstyle
+            - name: checkstyle # run Checkstyle static analysis
               run: mvn checkstyle:checkstyle
-    
     Security-Scan:
-        runs-on: ubuntu-latest
-        needs: Build
+        runs-on: ubuntu-latest # run security scan on Ubuntu runner
+        needs: Build # scan after successful Build
         steps:
-            - name: security scan
+            - name: security scan # run Trivy filesystem vulnerability scan
               uses: aquasecurity/trivy-action@v0.9.0
               with:
-                scan-type: 'fs'
-                scan-path: '.'
-                format: 'json'
-                exit-code: 0
-                vuln-type: 'os,library'
-                output: 'trivy-report.json'
-            - name: upload security scan report
+                scan-type: 'fs' # scan the repo filesystem rather than a container image
+                scan-path: '.' # scan the current workspace root
+                format: 'json' # output report as JSON
+                exit-code: 0 # do not fail workflow when vulnerabilities are found
+                vuln-type: 'os,library' # scan OS packages and language libraries
+                output: 'trivy-report.json' # save report to this file
+            - name: upload security scan report # upload scan output as artifact
               uses: actions/upload-artifact@v4
               with:
-                name: trivy-report
-                path: trivy-report.json
+                name: trivy-report # artifact name for the scan report
+                path: trivy-report.json # path to the report file
+    BUILD_AND_PUBLISH:
+      name: Build and Publish Docker Image # job name shown in GitHub Actions UI
+      runs-on: ubuntu-latest # use the Ubuntu runner for this job
+      environment: Production # set the environment to Production
+      needs: [Build, Testing, Security-Scan] # wait for these jobs to finish first
+      if: github.ref == 'refs/heads/main' # only run this job on the main branch
+      steps:
+        - name: Checkout code # checkout repository source into the runner
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0 # use full git history, not a shallow clone
+        - name: Aws credentials # configure AWS credentials for ECR login
+          uses: aws-actions/configure-aws-credentials@v2
+          with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # AWS key stored in repo secrets
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} # AWS secret stored in repo secrets
+            aws-region: ${{ vars.AWS_REGION }} # region from repository variables
+        - name: Login to ecr # authenticate Docker to Amazon ECR
+          id: login-ecr
+          uses: aws-actions/amazon-ecr-login@v2
+        - name: Build, Tag, and Push Docker Image # build and publish Docker image to ECR
+          id: build-image
+          env:
+            ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }} # use the registry URL returned by login step
+            IMAGE_TAG: ${{ github.sha }} # tag image with the current commit SHA
+          run: |
+            docker build -f Docker-files/app/multistage/Dockerfile -t $ECR_REGISTRY/ECR_REPOSITORY_NAME:$IMAGE_TAG . # build the Docker image from the multi-stage Dockerfile
+            docker push $ECR_REGISTRY/ECR_REPOSITORY_NAME:$IMAGE_TAG # push the image to ECR
+            echo "Image=$ECR_REGISTRY/ECR_REPOSITORY_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUTS # set output variable with the image reference
+
+# Explanation:
+# name: Build Job                => sets the workflow title shown in GitHub Actions.
+# on: push: branches: - main      => triggers the workflow when code is pushed to the main branch.
+# on: pull_request: branches: - main => triggers on PRs targeting main.
+# permissions: contents: read     => gives the workflow read-only access to repo contents.
+# jobs: Build:                    => defines the first job named Build.
+# runs-on: ubuntu-latest         => uses the latest Ubuntu VM for the job.
+# steps:                         => sequence of steps executed in order.
+# - name: code checkout           => checks out repository files into the runner workspace.
